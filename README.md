@@ -1,55 +1,60 @@
-# obs2gt — 观测 → 真值 图像重建（地面仿真）
+# obs2gt — Observation → Ground-Truth Image Reconstruction (Ground-based Simulation)
 
-从 SKIRT 星系立方体出发，前向模拟地面 r 波段观测，并训练一个变分自编码器
-（VAE）从 **含噪观测（OBS）** 重建 **无噪真值（GT）**。
+Starting from SKIRT galaxy cubes, we forward-simulate ground-based r-band
+observations and train a variational autoencoder (VAE) to reconstruct the
+**noiseless ground truth (GT)** from the **noisy observation (OBS)**.
 
-本仓库包含复现重建结果所需的全部**仿真**与**训练**代码，以及所依赖的模型库。
-（结果评估 / 绘图脚本不在本仓库内。）
+This repository contains all the **simulation** and **training** code required
+to reproduce the reconstruction results, together with the underlying model
+library. (Result evaluation / plotting scripts are not part of this repository.)
 
-## 目录结构
+## Layout
 
 ```
 obs2gt/
-├── main.py                       # 训练入口（PyTorch Lightning / OmegaConf）
-├── configs/generation/           # 三组实验配置（同一网络，仅损失不同）
-│   ├── ground_mae_l.yaml         #   L1/MAE 监督
-│   ├── ground_mse_l.yaml         #   MSE 监督
-│   └── ground_chi2_l_obsivar.yaml#   观测方差加权的 χ² 监督
-├── ground_sim/                   # 前向仿真（生成数据集）
-│   ├── forward_model.py          #   SKIRT → 地面观测前向模型（OBS/GT/SIGMA）
-│   └── build_dataset.py          #   批量构建 train/valid/test 数据集
-└── sgm/                          # 模型库（AutoencodingEngine、Encoder/Decoder、
-                                  # Regularizer、DiscVAELoss、DataModule、Dataset 等）
+├── main.py                       # Training entry point (PyTorch Lightning / OmegaConf)
+├── configs/generation/           # Three experiment configs (same network, different loss)
+│   ├── ground_mae_l.yaml         #   L1 / MAE supervision
+│   ├── ground_mse_l.yaml         #   MSE supervision
+│   └── ground_chi2_l_obsivar.yaml#   Observation-variance-weighted χ² supervision
+├── ground_sim/                   # Forward simulation (dataset generation)
+│   ├── forward_model.py          #   SKIRT → ground-based observation forward model (OBS/GT/SIGMA)
+│   └── build_dataset.py          #   Batch builder for train/valid/test datasets
+└── sgm/                          # Model library (AutoencodingEngine, Encoder/Decoder,
+                                  # Regularizer, DiscVAELoss, DataModule, Dataset, ...)
 ```
 
-## 流程
+## Pipeline
 
-### 1. 生成仿真数据集
+### 1. Generate the simulated dataset
 
-`ground_sim/forward_model.py` 实现完整前向链：光度距离流量缩放、角尺寸缩放、
-Moffat PSF 卷积、天空背景（含倾斜残差）、多次曝光 Poisson + 读出噪声，以及
-**从数据本身估计**的背景与方差（构造 SIGMA 时从不使用 GT）。
+`ground_sim/forward_model.py` implements the full forward chain: luminosity-distance
+flux scaling, angular-size scaling, Moffat PSF convolution, sky background (with a
+tilt residual), multi-exposure Poisson + read noise, and a background and variance
+that are **estimated from the data itself** (GT is never used to build SIGMA).
 
 ```bash
-python -m ground_sim.build_dataset --out-root <数据集输出目录> --workers 250
+python -m ground_sim.build_dataset --out-root <dataset-output-dir> --workers 250
 ```
 
-每个观测取 4 个随机 64×64 cutout。数据布局：
+Each observation yields 4 random 64×64 cutouts. Data layout:
 
 ```
 <root>/{train,valid,test}/GROUND_R/
-    BGSUB/<name>.fits     # HDU0 = OBS（nanomaggy，背景已减）
-                          # test 另有 HDU1 "GT" + HDU2 "COVERAGE"
+    BGSUB/<name>.fits     # HDU0 = OBS (nanomaggy, background-subtracted)
+                          # test additionally has HDU1 "GT" + HDU2 "COVERAGE"
     INVVAR/<name>.fits    # HDU0 = 1/SIGMA²
 ```
 
-> train/valid 的 BGSUB **不含 GT**，因此重建误差在训练/验证阶段物理上无法泄漏。
+> The train/valid BGSUB files **contain no GT**, so reconstruction error cannot
+> leak into the training/validation loss by construction.
 
-### 2. 训练
+### 2. Training
 
-`sgm/models/autoencoder.py` 的 `AutoencodingEngine` 以 64×64 单通道 OBS 为输入，
-输出重建图；编码器为 `cat_invvar=False`（SIGMA 只进入损失加权，不进入网络输入）。
-large 规模：`ch=128, z_channels=80, ch_mult=[1,2,4]`。
+`AutoencodingEngine` in `sgm/models/autoencoder.py` takes a single-channel 64×64
+OBS image and outputs a reconstruction; the encoder uses `cat_invvar=False`
+(SIGMA only enters the loss weighting, never the network input).
+Large size: `ch=128, z_channels=80, ch_mult=[1,2,4]`.
 
 ```bash
 python main.py --base configs/generation/ground_mae_l.yaml  --train --gpus 0,
@@ -57,15 +62,18 @@ python main.py --base configs/generation/ground_mse_l.yaml  --train --gpus 0,
 python main.py --base configs/generation/ground_chi2_l_obsivar.yaml --train --gpus 0,
 ```
 
-三组配置仅 `loss_type`（`mae` / `mse` / `chi2`）不同，网络结构与数据一致。
+The three configs differ only in `loss_type` (`mae` / `mse` / `chi2`); the
+network architecture and data are identical.
 
-## 说明
+## Notes
 
-- 实验中的三组 large 模型用同一套网络、同一份数据、仅更换损失，用于对比
-  MAE / MSE / 观测方差加权 χ² 对重建质量的影响（对应 seed 42）。
-- 训练配置中的数据集路径为实验机器上的绝对路径，迁移时请按需修改
-  `data.params.train.dataset.path` 与 `data.params.validation.dataset.path`。
+- The three large-tier models share the same network and the same data and differ
+  only in the loss, in order to compare the effect of MAE / MSE / observation-
+  variance-weighted χ² on reconstruction quality (seed 42).
+- The dataset paths in the training configs are absolute paths from the
+  experiment machine; adjust `data.params.train.dataset.path` and
+  `data.params.validation.dataset.path` as needed when moving elsewhere.
 
-## 环境
+## Environment
 
-见 `requirements.txt`（Python 3.10+，CUDA 版 PyTorch）。
+See `requirements.txt` (Python 3.10+, CUDA build of PyTorch).
