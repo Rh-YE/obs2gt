@@ -1,0 +1,156 @@
+# Ground-simulation VAE — mse loss, LARGE size.
+# ch=128, z_channels=80, latent_dim=80 (matches original DESI sizing). Part of a size sweep (small/medium/
+# large) x (mae/mse/chi2) x 3 seeds; within each size the three loss configs
+# are identical except loss_type and monitor. Network input is OBS only
+# (cat_invvar=False keeps sigma out of the encoder); sigma reaches only the
+# loss weighting. GT is physically absent from train/valid FITS files, so it
+# cannot enter any training/validation loss. 60k steps (up from an earlier
+# 20k-step run whose validation curve had not yet flattened).
+model:
+  base_learning_rate: 1.0e-4
+  target: sgm.models.autoencoder.AutoencodingEngine
+  params:
+    input_key: images
+    monitor: train/loss/mse
+    disc_start_iter: 0
+    with_invvar: True
+    single_dim: False
+    latent_dim: 80
+    with_psf: False
+    random_psf: False
+    expand_psf: False
+    use_mask: True
+    accumulate_grad_batches: 1
+    cat_invvar: False
+    encoder_config:
+      target: sgm.modules.diffusionmodules.model.Encoder
+      params:
+        attn_type: none
+        double_z: true
+        z_channels: 80
+        resolution: 64
+        in_channels: 1
+        out_ch: 1
+        ch: 128
+        ch_mult: [1,2,4]
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
+        single_dim: ${model.params.single_dim}
+        latent_dim: ${model.params.latent_dim}
+        stylegan_act: False
+        softplus_out: True
+    decoder_config:
+      target: sgm.modules.diffusionmodules.model.Decoder
+      params: ${model.params.encoder_config.params}
+
+    regularizer_config:
+      target: sgm.modules.autoencoding.regularizers.DiagonalGaussianRegularizer
+
+    loss_config:
+      target: sgm.modules.autoencoding.losses.DiscVAELoss
+      params:
+        learn_logvar: False
+        loss_type: mse
+        use_mask: ${model.params.use_mask}
+        use_random_perceptual: True
+        mask_rules:
+          images_min: -0.1
+        regularization_weights:
+          kl_loss: 0.0001
+        cat_invvar: True
+        ssim_weight: 0
+        multiscale_chi2_weight: 0
+        multiscale_levels: 3
+        disc_in_channels: 1
+        perceptual_weight: 0
+        disc_start: 1000
+        disc_weight: 0
+data:
+  target: sgm.data.datamodule.DataModule
+  params:
+    train:
+      dataset:
+        path:
+        - /data1/public/renhaoye/dataset/ground_sim_v1/train/GROUND_R/
+        image_folder: BGSUB
+        error_folder: INVVAR
+        error_type: invvar
+        use_labels: false
+        reproj_wcs: false
+        match_files: false
+        normalize: false
+        crop: true
+        random_crop: false
+        random_rotation: false
+        target_w: ${model.params.encoder_config.params.resolution}
+        target_h: ${model.params.encoder_config.params.resolution}
+      loader:
+        batch_size: 64
+        num_workers: 16
+        pin_memory: true
+        persistent_workers: true
+        prefetch_factor: 3
+    validation:
+      dataset:
+        path:
+        - /data1/public/renhaoye/dataset/ground_sim_v1/valid/GROUND_R/
+        image_folder: ${data.params.train.dataset.image_folder}
+        error_folder: ${data.params.train.dataset.error_folder}
+        error_type: ${data.params.train.dataset.error_type}
+        use_labels: false
+        reproj_wcs: false
+        match_files: false
+        normalize: false
+        crop: ${data.params.train.dataset.crop}
+        random_crop: false
+        target_w: ${model.params.encoder_config.params.resolution}
+        target_h: ${model.params.encoder_config.params.resolution}
+      loader:
+        batch_size: 32
+        num_workers: 16
+        pin_memory: true
+        persistent_workers: true
+
+lightning:
+  strategy:
+    target: pytorch_lightning.strategies.DDPStrategy
+    params:
+      find_unused_parameters: True
+
+  modelcheckpoint:
+    params:
+      every_n_epochs: 1
+      save_top_k: 5
+
+  callbacks:
+    metrics_over_trainsteps_checkpoint:
+      params:
+        every_n_train_steps: 10000
+
+    image_logger:
+      target: main.ImageLogger
+      params:
+        disabled: False
+        rescale: False
+        enable_autocast: False
+        batch_frequency: 5000
+        max_images: 64
+        increase_log_steps: False
+        log_first_step: False
+        log_images_kwargs:
+          use_ema_scope: False
+          N: 64
+          n_rows: 8
+
+    checkpoint_linker:
+      params:
+        link_interval: 500
+
+  trainer:
+    devices: 0,
+    limit_val_batches: 100
+    benchmark: True
+    val_check_interval: 250
+    num_sanity_val_steps: 0
+    max_steps: 60000

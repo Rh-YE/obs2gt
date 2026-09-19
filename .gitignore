@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Model checkpoints / training artifacts (not part of this repo)
+*.ckpt
+logs/
+wandb/
+
+# Generated data / figures
+data/
+*.png
+*.npz
+*.fits
+*.fit
+*.npy
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
